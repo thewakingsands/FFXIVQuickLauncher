@@ -12,19 +12,12 @@ using Serilog;
 using XIVLauncher.PatchInstaller.PatcherIpcMessages;
 using XIVLauncher.PatchInstaller.ZiPatch;
 using XIVLauncher.PatchInstaller.ZiPatch.Util;
-using ZetaIpc.Runtime.Client;
-using ZetaIpc.Runtime.Server;
 
 namespace XIVLauncher.PatchInstaller
 {
     public class PatcherMain
     {
         public const string BASE_GAME_VERSION = "2012.01.01.0000.0000";
-
-        private static IpcServer _server = new IpcServer();
-        private static IpcClient _client = new IpcClient();
-        public const int IPC_SERVER_PORT = 0xff16;
-        public const int IPC_CLIENT_PORT = 0xff30;
 
         public static JsonSerializerSettings JsonSettings = new JsonSerializerSettings
         {
@@ -38,7 +31,6 @@ namespace XIVLauncher.PatchInstaller
             {
                 Log.Logger = new LoggerConfiguration()
                     .WriteTo.Console()
-                    .WriteTo.File(Path.Combine(Paths.RoamingPath, "patcher.log"))
                     .WriteTo.Debug()
                     .MinimumLevel.Verbose()
                     .CreateLogger();
@@ -47,8 +39,14 @@ namespace XIVLauncher.PatchInstaller
                 {
                     try
                     {
-                        InstallPatch(args[0], args[1]);
-                        Log.Information("OK");
+                        if (InstallPatch(args[0], args[1]))
+                        {
+                            Log.Information("OK");
+                        }
+                        else
+                        {
+                            Environment.Exit(-1);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -59,35 +57,14 @@ namespace XIVLauncher.PatchInstaller
                     Environment.Exit(0);
                     return;
                 }
-
-                _client.Initialize(IPC_SERVER_PORT);
-                _server.Start(IPC_CLIENT_PORT);
-                _server.ReceivedRequest += ServerOnReceivedRequest;
-
-                Log.Information("[PATCHER] IPC connected");
-
-                SendIpcMessage(new PatcherIpcEnvelope
+                else
                 {
-                    OpCode = PatcherIpcOpCode.Hello,
-                    Data = DateTime.Now
-                });
-
-                Log.Information("[PATCHER] sent hello");
-
-                while (true)
-                {
-                    if (Process.GetProcesses().All(x => x.ProcessName != "XIVLauncher"))
-                    {
-                        Environment.Exit(0);
-                        return;
-                    }
-
-                    Thread.Sleep(1000);
+                    Console.WriteLine("Missing Arguments.");
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Patcher init failed.\n\n" + ex, "XIVLauncher", MessageBoxButton.OK, MessageBoxImage.Error);
+                Console.WriteLine("Patcher init failed.\n\n" + ex);
             }
 
             return;
@@ -220,90 +197,6 @@ namespace XIVLauncher.PatchInstaller
             }
 
             Console.WriteLine("XIVLauncher.PatchInstaller\n\nUsage:\nXIVLauncher.PatchInstaller.exe <patch path> <game path> <repository>\nOR\nXIVLauncher.PatchInstaller.exe <pipe name>");
-        }
-
-        private static void ServerOnReceivedRequest(object sender, ReceivedRequestEventArgs e)
-        {
-            Log.Information("[PATCHER] IPC: " + e.Request);
-
-            var msg = JsonConvert.DeserializeObject<PatcherIpcEnvelope>(Base64Decode(e.Request), JsonSettings);
-
-            switch (msg.OpCode)
-            {
-                case PatcherIpcOpCode.Bye:
-                    Task.Run(() =>
-                    {
-                        Thread.Sleep(3000);
-                        Environment.Exit(0);
-                    });
-                    break;  
-
-                case PatcherIpcOpCode.StartInstall:
-                    var installData = (PatcherIpcStartInstall) msg.Data;
-
-                    // Ensure that subdirs exist
-                    if (!installData.GameDirectory.Exists)
-                        installData.GameDirectory.Create();
-
-                    installData.GameDirectory.CreateSubdirectory("game");
-                    installData.GameDirectory.CreateSubdirectory("boot");
-
-                    Task.Run(() =>
-                        InstallPatch(installData.PatchFile.FullName,
-                            Path.Combine(installData.GameDirectory.FullName, installData.Repo == Repository.Boot ? "boot" : "game")))
-                        .ContinueWith(t =>
-                    {
-                        if (!t.Result)
-                        {
-                            Log.Error(t.Exception, "PATCH INSTALL FAILED");
-                            SendIpcMessage(new PatcherIpcEnvelope
-                            {
-                                OpCode = PatcherIpcOpCode.InstallFailed
-                            });
-                        }
-                        else
-                        {
-                            try
-                            {
-                                installData.Repo.SetVer(installData.GameDirectory, installData.VersionId);
-                                SendIpcMessage(new PatcherIpcEnvelope
-                                {
-                                    OpCode = PatcherIpcOpCode.InstallOk
-                                });
-
-                                try
-                                {
-                                    if (!installData.KeepPatch)
-                                        installData.PatchFile.Delete();
-                                }
-                                catch (Exception exception)
-                                {
-                                    Log.Error(exception, "Could not delete patch file.");
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                Log.Error(ex, "Could not set ver file");
-                                SendIpcMessage(new PatcherIpcEnvelope
-                                {
-                                    OpCode = PatcherIpcOpCode.InstallFailed
-                                });
-                            }
-                        }
-                    });
-                    break;
-
-                case PatcherIpcOpCode.Finish:
-                    var path = (DirectoryInfo) msg.Data;
-                    VerToBck(path);
-                    Log.Information("VerToBck done");
-                    break;
-            }
-        }
-
-        private static void SendIpcMessage(PatcherIpcMessages.PatcherIpcEnvelope envelope)
-        {
-            _client.Send(Base64Encode(JsonConvert.SerializeObject(envelope, Formatting.None, JsonSettings)));
         }
 
         public static string Base64Encode(string plainText)
